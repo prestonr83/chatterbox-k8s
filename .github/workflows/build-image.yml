@@ -1,0 +1,112 @@
+name: Build image
+
+# Builds devnen/Chatterbox-TTS-Server (NVIDIA/CUDA build) and pushes it to GHCR.
+# The upstream version comes from the UPSTREAM_REF file, or from the manual-run input.
+on:
+  push:
+    branches: [main]
+    paths:
+      - UPSTREAM_REF
+      - .github/workflows/build-image.yml
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Upstream branch, tag or commit (blank = use UPSTREAM_REF)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-image
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/chatterbox-tts-server
+  UPSTREAM_REPO: devnen/Chatterbox-TTS-Server
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      # The CUDA + PyTorch image is many GB; the stock runner doesn't have enough free disk.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Check out this repo
+        uses: actions/checkout@v4
+
+      - name: Resolve upstream ref
+        id: ref
+        run: |
+          REF="${{ github.event.inputs.upstream_ref }}"
+          [ -z "$REF" ] && REF="$(tr -d '[:space:]' < UPSTREAM_REF)"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+      - name: Check out upstream
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ steps.ref.outputs.ref }}
+          path: upstream
+
+      - name: Upstream commit
+        id: up
+        run: echo "sha=$(git -C upstream rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ steps.up.outputs.sha }}
+          labels: |
+            org.opencontainers.image.title=chatterbox-tts-server
+            org.opencontainers.image.description=devnen/Chatterbox-TTS-Server (NVIDIA build) at ${{ steps.up.outputs.sha }}
+            org.opencontainers.image.revision=${{ steps.up.outputs.sha }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: upstream
+          file: upstream/Dockerfile
+          build-args: RUNTIME=nvidia
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Summary
+        run: |
+          {
+            echo "### Pushed"
+            echo '```'
+            echo "${{ env.IMAGE }}:${{ steps.up.outputs.sha }}"
+            echo "${{ env.IMAGE }}:latest"
+            echo '```'
+            echo "Upstream: ${{ env.UPSTREAM_REPO }} @ ${{ steps.ref.outputs.ref }} (${{ steps.up.outputs.sha }})"
+            echo
+            echo "Pin it: set \`newTag: ${{ steps.up.outputs.sha }}\` in k8s/kustomization.yaml"
+          } >> "$GITHUB_STEP_SUMMARY"

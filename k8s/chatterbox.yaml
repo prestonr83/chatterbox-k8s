@@ -1,0 +1,125 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tts
+---
+# Hugging Face model cache. Original + Turbo + Multilingual weights add up to several GB.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chatterbox-models
+  namespace: tts
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 40Gi
+---
+# Voices, cloned reference clips, config.yaml, outputs, logs.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chatterbox-data
+  namespace: tts
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatterbox
+  namespace: tts
+  labels:
+    app: chatterbox
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate            # single GPU: never run two copies at once
+  selector:
+    matchLabels:
+      app: chatterbox
+  template:
+    metadata:
+      labels:
+        app: chatterbox
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        kubernetes.io/hostname: k3s-server-01
+      initContainers:
+        # Mounting the PVC over /app/voices would hide the predefined voices that ship
+        # in the image, so seed them into the PVC once (never overwrites your files).
+        - name: seed-voices
+          image: ghcr.io/prestonr83/chatterbox-tts-server
+          imagePullPolicy: Always
+          command: ["sh", "-c", "mkdir -p /data/voices /data/reference_audio /data/outputs /data/logs /data/model_cache /data/persist && cp -rn /app/voices/. /data/voices/ 2>/dev/null || true"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: chatterbox
+          image: ghcr.io/prestonr83/chatterbox-tts-server
+          imagePullPolicy: Always
+          # config.yaml is created by the server on first run and edited by the web UI;
+          # symlink it onto the PVC so UI changes survive restarts.
+          command: ["sh", "-c", "ln -sf /app/persist/config.yaml /app/config.yaml && exec python3 server.py"]
+          ports:
+            - name: http
+              containerPort: 8004
+          env:
+            - name: HF_HOME
+              value: /app/hf_cache
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              memory: 12Gi
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - { name: models, mountPath: /app/hf_cache }
+            - { name: data, mountPath: /app/voices,          subPath: voices }
+            - { name: data, mountPath: /app/reference_audio, subPath: reference_audio }
+            - { name: data, mountPath: /app/outputs,         subPath: outputs }
+            - { name: data, mountPath: /app/logs,            subPath: logs }
+            - { name: data, mountPath: /app/model_cache,     subPath: model_cache }
+            - { name: data, mountPath: /app/persist,         subPath: persist }
+          # First start downloads model weights from Hugging Face: allow up to 20 minutes.
+          startupProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 10
+            failureThreshold: 120
+          livenessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 30
+            failureThreshold: 6
+          readinessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 10
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: chatterbox-models
+        - name: data
+          persistentVolumeClaim:
+            claimName: chatterbox-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chatterbox
+  namespace: tts
+spec:
+  selector:
+    app: chatterbox
+  ports:
+    - name: http
+      port: 8004
+      targetPort: http

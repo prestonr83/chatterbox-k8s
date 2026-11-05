@@ -1,0 +1,21 @@
+# Optional: web UI at https://tts.rdz.sh through your existing Traefik.
+# Needs (1) an internal DNS record tts.rdz.sh -> 10.0.0.160, like hass.rdz.sh, and
+# (2) a TLS secret "tts-rdz-sh-tls" in namespace tts, made the same way as hass-rdz-sh-tls.
+# The server has NO authentication: anyone who can reach it can generate speech
+# and upload voices. Keep it LAN-only.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: chatterbox-https
+  namespace: tts
+spec:
+  entryPoints: [websecure]
+  routes:
+    - kind: Rule
+      match: Host(`tts.rdz.sh`)
+      services:
+        - name: chatterbox
+          port: 8004
+          scheme: http
+  tls:
+    secretName: tts-rdz-sh-tls
