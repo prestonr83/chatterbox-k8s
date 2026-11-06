@@ -68,7 +68,7 @@ spec:
           command: ["sh", "-c", "ln -sf /app/persist/config.yaml /app/config.yaml && exec python3 server.py"]
           ports:
             - name: http
-              containerPort: 8004
+              containerPort: 8000
           env:
             - name: HF_HOME
               value: /app/hf_cache
